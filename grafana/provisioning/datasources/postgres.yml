@@ -1,0 +1,19 @@
+apiVersion: 1
+
+datasources:
+  - name: Greenhouse PostgreSQL
+    type: postgres
+    url: postgres:5432
+    database: greenhouse
+    user: postgres
+    secureJsonData:
+      password: "Wireswires12345."
+    jsonData:
+      sslmode: disable
+      maxOpenConns: 10
+      maxIdleConns: 2
+      connMaxLifetime: 14400
+      postgresVersion: 1500
+      timescaledb: false
+    isDefault: true
+    editable: true

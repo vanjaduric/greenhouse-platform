@@ -1,0 +1,280 @@
+networks:
+  greenhouse_net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  minio_data:
+  kafka_data:
+  grafana_data:
+
+services:
+
+# ── Bronze Service ──────────────────────────────────────────────
+  bronze:
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
+    container_name: bronze
+    networks:
+      - greenhouse_net
+    depends_on:
+      kafka:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
+      ingestion_service:
+        condition: service_started    # ← just needs to be started, not healthy
+    environment:
+      KAFKA_BOOTSTRAP:  kafka:9092
+      MINIO_ENDPOINT:   http://minio:9000
+      MINIO_ACCESS_KEY: vadjuric
+      MINIO_SECRET_KEY: Wireswires12345.
+      BRONZE_PATH:      s3a://greenhouse-lake/bronze
+      CHECKPOINT_PATH:  s3a://greenhouse-lake/checkpoints/bronze
+    restart: unless-stopped
+  # ── Kafka (KRaft) ──────────────────────────────────────────────
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: kafka
+    networks:
+      - greenhouse_net
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  # ── Kafka topic initializer ────────────────────────────────────
+  kafka-init:
+    image: apache/kafka:3.7.0
+    container_name: kafka-init
+    networks:
+      - greenhouse_net
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./init-kafka-topics.sh:/init-kafka-topics.sh
+    entrypoint: ["/bin/bash", "/init-kafka-topics.sh"]
+
+  # ── Postgres (shared — greenhouse data + Airflow metadata) ─────
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    networks:
+      - greenhouse_net
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 'Wireswires12345.'
+      POSTGRES_DB: greenhouse
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-postgres.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      retries: 5
+
+  # ── MinIO ──────────────────────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    networks:
+      - greenhouse_net
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: vadjuric
+      MINIO_ROOT_PASSWORD: 'Wireswires12345.'
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      retries: 5
+
+  # ── MinIO bucket initializer ───────────────────────────────────
+  minio-init:
+    image: minio/mc
+    container_name: minio-init
+    networks:
+      - greenhouse_net
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 vadjuric Wireswires12345.;
+      mc mb --ignore-existing local/greenhouse-lake;
+      echo 'Bucket greenhouse-lake ready';
+      "
+
+  # ── Mock API ───────────────────────────────────────────────────
+  mock_api:
+    build: ./mock_api
+    container_name: mock_api
+    networks:
+      - greenhouse_net
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Ingestion Service ──────────────────────────────────────────
+  ingestion_service:
+    build: ./ingestion_service
+    container_name: ingestion_service
+    networks:
+      - greenhouse_net
+    depends_on:
+      kafka:
+        condition: service_healthy
+      mock_api:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      API_BASE_URL: http://mock_api:8000
+      KAFKA_BOOTSTRAP: kafka:9092
+    restart: unless-stopped
+  # ── Consumer Service ──────────────────────────────────────────
+  consumer_service:
+    build: ./consumer_service
+    container_name: consumer_service
+    networks:
+      - greenhouse_net
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      POSTGRES_CONN: "host=postgres port=5432 dbname=greenhouse user=postgres password=Wireswires12345."
+    restart: unless-stopped
+
+  # ── Airflow init (one-time DB setup) ───────────────────────────
+  airflow-init:
+    build:
+      context: .
+      dockerfile: airflow.Dockerfile
+    container_name: airflow-init
+    networks:
+      - greenhouse_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate && \
+        airflow users create \
+          --username airflow \
+          --password airflow \
+          --firstname Vanja \
+          --lastname Duric \
+          --role Admin \
+          --email vanja@greenhouse.com && \
+        airflow connections add 'minio_s3' \
+          --conn-type 'aws' \
+          --conn-login 'vadjuric' \
+          --conn-password 'Wireswires12345.' \
+          --conn-extra '{"endpoint_url": "http://minio:9000"}' || true
+    restart: on-failure
+
+  # ── Airflow scheduler + webserver ─────────────────────────────
+  airflow:
+    build:
+      context: .
+      dockerfile: airflow.Dockerfile
+    container_name: airflow
+    networks:
+      - greenhouse_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'true'
+      # connection strings for your pipeline
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: vadjuric
+      MINIO_SECRET_KEY: 'Wireswires12345.'
+      KAFKA_BOOTSTRAP: kafka:9092
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./spark:/opt/airflow/spark_jobs
+    ports:
+      - "8081:8080"    # Airflow UI → localhost:8081
+    command: bash -c "airflow scheduler & airflow webserver"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Grafana ────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    networks:
+      - greenhouse_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    restart: unless-stopped
