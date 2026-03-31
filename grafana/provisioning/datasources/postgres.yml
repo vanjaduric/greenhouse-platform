@@ -4,10 +4,10 @@ datasources:
   - name: Greenhouse PostgreSQL
     type: postgres
     url: postgres:5432
-    database: greenhouse
-    user: postgres
+    database: ${POSTGRES_DB}
+    user: ${POSTGRES_USER}
     secureJsonData:
-      password: "Wireswires12345."
+      password: ${POSTGRES_PASS}
     jsonData:
       sslmode: disable
       maxOpenConns: 10

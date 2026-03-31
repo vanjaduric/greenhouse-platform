@@ -1,12 +1,14 @@
+"""
+Consumer service: reads sensor readings from Kafka and upserts
+the latest value per sensor into Postgres for live Grafana dashboards.
+"""
 import os
 import json
-import time
 import psycopg2
 from kafka import KafkaConsumer
-from datetime import datetime
 
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP")
-POSTGRES_CONN = os.getenv(
+POSTGRES_CONN   = os.getenv(
     "POSTGRES_CONN",
     f"host={os.getenv('POSTGRES_HOST')} "
     f"port=5432 "
@@ -14,13 +16,6 @@ POSTGRES_CONN = os.getenv(
     f"user={os.getenv('POSTGRES_USER')} "
     f"password={os.getenv('POSTGRES_PASS')}"
 )
-SENSOR_TOPICS = [
-    "sensors.temperature",
-    "sensors.humidity",
-    "sensors.co2",
-    "sensors.light",
-    "sensors.airflow"
-]
 
 TOPIC_TO_TYPE = {
     "sensors.temperature": "temperature",
@@ -31,11 +26,11 @@ TOPIC_TO_TYPE = {
 }
 
 consumer = KafkaConsumer(
-    *SENSOR_TOPICS,
+    *TOPIC_TO_TYPE.keys(),
     bootstrap_servers=KAFKA_BOOTSTRAP,
-    value_deserializer=lambda v: json.loads(v.decode('utf-8')),
+    value_deserializer=lambda v: json.loads(v.decode("utf-8")),
     group_id="fast-path-consumer",
-    auto_offset_reset="latest"  # only read new messages, not history
+    auto_offset_reset="latest"
 )
 
 def get_conn():
@@ -61,13 +56,12 @@ def upsert_reading(conn, topic, msg):
     sensor_type = TOPIC_TO_TYPE.get(topic)
     if not sensor_type:
         return
-
     with conn.cursor() as cur:
         cur.execute("""
-            INSERT INTO live_readings 
+            INSERT INTO live_readings
                 (facility_id, sensor_id, sensor_type, value, unit, is_anomaly, recorded_at)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (facility_id, sensor_id) 
+            ON CONFLICT (facility_id, sensor_id)
             DO UPDATE SET
                 value       = EXCLUDED.value,
                 unit        = EXCLUDED.unit,
@@ -79,20 +73,17 @@ def upsert_reading(conn, topic, msg):
             sensor_type,
             msg.get("value"),
             msg.get("unit"),
-            msg.get("anomaly_injected") is not None,
+            msg.get("value") is None,
             msg.get("timestamp")
         ))
     conn.commit()
 
-print("Fast path consumer started")
 conn = get_conn()
 ensure_table(conn)
-print("live_readings table ready")
-print("Consuming from Kafka → writing to Postgres...")
 
 for message in consumer:
     try:
         upsert_reading(conn, message.topic, message.value)
     except Exception as e:
         print(f"Error: {e}")
-        conn = get_conn()  # reconnect on error
+        conn = get_conn()
