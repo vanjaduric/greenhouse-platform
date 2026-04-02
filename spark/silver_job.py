@@ -6,11 +6,7 @@ Triggered by Airflow every 30 minutes.
 import os
 from datetime import datetime
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import (
-    col, when, isnan, isnull, stddev, mean,
-    abs as spark_abs, current_timestamp, exp,
-    round as spark_round, to_timestamp, unix_timestamp, lit
-)
+from pyspark.sql.functions import (col, when, isnan, isnull, stddev, mean,abs as spark_abs, current_timestamp, exp,round as spark_round, to_timestamp, unix_timestamp, lit)
 from pyspark.sql.window import Window
 from pyspark.sql.types import DoubleType
 

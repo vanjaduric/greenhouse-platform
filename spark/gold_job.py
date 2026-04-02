@@ -7,11 +7,7 @@ import os
 import psycopg2
 from datetime import datetime
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import (
-    col, avg, stddev, count, sum as spark_sum,
-    when, window, round as spark_round,
-    current_timestamp, lit, first
-)
+from pyspark.sql.functions import (col, avg, stddev, count, sum as spark_sum, when, window, round as spark_round,current_timestamp, lit, first)
 from pyspark.sql.types import FloatType
 
 MINIO_ENDPOINT   = os.getenv("MINIO_ENDPOINT")

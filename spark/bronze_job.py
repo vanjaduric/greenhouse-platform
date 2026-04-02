@@ -6,10 +6,7 @@ writes raw Parquet to MinIO partitioned by facility/date/hour.
 import os
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, from_json, current_timestamp, to_date, hour
-from pyspark.sql.types import (
-    StructType, StructField, StringType, DoubleType,
-    IntegerType, BooleanType
-)
+from pyspark.sql.types import (StructType, StructField, StringType, DoubleType,IntegerType, BooleanType)
 
 KAFKA_BOOTSTRAP  = os.getenv("KAFKA_BOOTSTRAP")
 MINIO_ENDPOINT   = os.getenv("MINIO_ENDPOINT")
@@ -76,9 +73,12 @@ sensor_parsed = spark.readStream \
     .withColumn("date", to_date(col("bronze_landed_at"))) \
     .withColumn("hour", hour(col("bronze_landed_at")))
 
+
+
+
 sensor_parsed.coalesce(1).writeStream \
     .format("parquet") \
-    .option("path",               f"{BRONZE_PATH}/sensors") \
+    .option("path",             f"{BRONZE_PATH}") \
     .option("checkpointLocation", f"{CHECKPOINT_PATH}/sensors") \
     .partitionBy("facility_id", "date", "hour") \
     .trigger(processingTime="30 seconds") \
